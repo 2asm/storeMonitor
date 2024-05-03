@@ -1,0 +1,35 @@
+version: '3.1'
+
+services:
+  postgres001:
+    container_name: ${POSTGRES_HOST} 
+    build: 
+      context: .
+      dockerfile: ./postgres.dockerfile
+    env_file:
+      - .env
+    ports:
+      - 5432:5432
+    networks:
+      - monitor-net
+
+  api:
+    container_name: storeManager001
+    build: 
+      context: .
+      dockerfile: ./api.dockerfile
+    env_file:
+      - .env
+    ports:
+      - 5000:5000
+    depends_on:
+      - postgres001
+    restart: on-failure
+    networks:
+      - monitor-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+networks:
+  monitor-net:
+    driver: bridge
