@@ -1,4 +1,5 @@
 # Store monitor
+Warning: git pull (if you don't have reports directory in your project)
 ### System Info
 - Ubuntu 22.04 LTS
 - Docker
