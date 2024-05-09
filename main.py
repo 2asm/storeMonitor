@@ -1,14 +1,16 @@
 import os
-from threading import Thread
-import psycopg
 import uuid
-from multiprocessing import Process, Pool
-from queue import Queue
-
 import csv
+
+import psycopg
+
+from queue import Queue
+from threading import Thread
+from multiprocessing import Pool
+
+
 from datetime import timedelta, datetime
 import time
-from dateutil import tz
 
 from flask import Flask, jsonify, send_from_directory
 from dotenv import load_dotenv
@@ -35,7 +37,6 @@ dbInfo = f"host={postgresHost} port={postgresPort} user={postgresUser} \
         password={postgresPassword} dbname={postgresDB} sslmode=disable"
 
 cur_time = datetime.now()
-utc_zone = tz.gettz('UTC')
 while True:
     try:
         with psycopg.connect(dbInfo) as conn:
@@ -46,6 +47,7 @@ while True:
 
 with psycopg.connect(dbInfo) as conn:
     with conn.cursor() as cur:
+        # menu_hours(store business hours) table setup
         cur.execute("""TRUNCATE menu_hours;""")
         mp = dict()
         with open("data/menu_hours.csv") as fp:
@@ -79,6 +81,8 @@ with psycopg.connect(dbInfo) as conn:
                 ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s);
             """, vals)
         print("DB setup done")
+
+        # geting max timestamp_utc
         cur.execute("""select max(timestamp_utc) from store_status;""")
         e = cur.fetchone()
         if not e:
@@ -89,16 +93,7 @@ with psycopg.connect(dbInfo) as conn:
         print("Current time(UTC):", cur_time)
         conn.commit()
 
-
-q = Queue()
-
-
-@app.route('/')
-def home():
-    return jsonify({
-        'msg': 'server online'
-    })
-
+# getting uptime and downtime for a single store
 def get_one(entry):
     uptime_last_hour = 60      # minutes
     uptime_last_day = 24       # hours
@@ -121,17 +116,11 @@ def get_one(entry):
     if not entry[16]:
         return f"{store_id},{60},{24},{7*24},{0},{0},{0}\n"
 
-    rs = entry[1:15]
+    weekday_local_time_list = entry[1:15] # first 7 are start time and next 7 are end time 
 
-    # to_zone = tz.gettz(entry[1])
-
-    for status, t, lt, wday in zip(entry[15], entry[16], entry[17], entry[18]):
-        # ltime = t.replace(tzinfo=utc_zone)
-        # ltime = ltime.astimezone(to_zone)
-        # wday = ltime.weekday()
-        # lt = ltime.time()
-        if lt>rs[wday] and lt<=rs[wday+7]:
-            if cur_time - t <= timedelta(hours=1):
+    for status, timestamp_utc, local_time, local_weekday in zip(entry[15], entry[16], entry[17], entry[18]):
+        if local_time > weekday_local_time_list[local_weekday] and local_time <= weekday_local_time_list[local_weekday+7]:
+            if cur_time - timestamp_utc <= timedelta(hours=1):
                 if status == 'active':
                     active_count_week += 1
                     active_count_day += 1
@@ -140,14 +129,14 @@ def get_one(entry):
                     inactive_count_week += 1
                     inactive_count_day += 1
                     inactive_count_hour += 1
-            elif cur_time - t <= timedelta(days=1):
+            elif cur_time - timestamp_utc <= timedelta(days=1):
                 if status == 'active':
                     active_count_day += 1
                     active_count_week += 1
                 else:
                     inactive_count_day += 1
                     inactive_count_week += 1
-            elif cur_time - t <= timedelta(days=7):
+            elif cur_time - timestamp_utc <= timedelta(days=7):
                 if status == 'active':
                     active_count_week += 1
                 else:
@@ -164,64 +153,65 @@ def get_one(entry):
         x = uptime_last_hour
         uptime_last_hour = int(x*(active_count_hour)/(active_count_hour + inactive_count_hour))
         downtime_last_hour = x - uptime_last_hour
+    return f"{store_id},{uptime_last_hour},{uptime_last_day},{uptime_last_week},{downtime_last_hour},{downtime_last_day},{downtime_last_week}\n"
 
-    s = f"{store_id},{uptime_last_hour},{uptime_last_day},{uptime_last_week},{downtime_last_hour},{downtime_last_day},{downtime_last_week}\n"
-    return s
 
 def trigger_report_generation(report_id):
     xstart_time = time.time()
     tmp_file = f"reports/{report_id}-tmp.csv"
     final_file = f"reports/{report_id}.csv"
+
+
+    store_list = []
+    with psycopg.connect(dbInfo) as conn:
+        with conn.cursor() as cur:
+            with open("all.sql", 'r') as f2:
+                cur.execute(f2.read())
+            store_list = cur.fetchall()
+            # print(store_list[0])
+        conn.commit()
+
+
+    ind = 0
+    ln = len(store_list)
     with open(tmp_file, 'w') as f:
         f.write("store_id, uptime_last_hour, uptime_last_day, uptime_last_week, downtime_last_hour, downtime_last_day, downtime_last_week\n")
-
-        with psycopg.connect(dbInfo) as conn:
-            with conn.cursor() as cur:
-
-                with open("all.sql", 'r') as f2:
-                    cur.execute(f2.read())
-                data = cur.fetchall()
-                # print(data[0])
-
-                i = 0
-                for d in data: 
-                    f.write(get_one(d))
-                    if i>0 and i%1500 == 0:
-                        print(f"Report - {report_id}.csv : {i/len(data)*100:.2f}% Done")
-                    i += 1
-
-            conn.commit()
+        for store in store_list: 
+            f.write(get_one(store))
+            ind += 1
+            if ind % 2000 == 0:
+                print(f"Report - {report_id}.csv : {ind/ln*100:.2f}% Done")
 
     os.rename(tmp_file, final_file)
     xend_time = time.time()
-    diff = int(xend_time-xstart_time)
+    diff = f"{xend_time-xstart_time:.2f}"
     print(f"Report - {report_id}.csv : Complete in {diff} seconds")
 
 
-def handle_all():
+proc_join_queue = Queue()
+
+def check_for_new_process_to_join():
     with Pool(processes=pool_size) as pool:
         while True:
-            id = q.get() 
+            id = proc_join_queue.get() 
             pool.apply_async(trigger_report_generation, args=(id,))
 
+Thread(target=check_for_new_process_to_join).start()
 
-Thread(target=handle_all).start()
 
-def handle_proc(p):
-    p.join()
+@app.route('/')
+def home():
+    return jsonify({
+        'msg': 'server online'
+    })
 
 @app.route("/trigger_report")
 def trigger_report():
     report_id = uuid.uuid4()
-    # p = Process(target=trigger_report_generation, args=(report_id,))
-    # p.start()
-    # t = Thread(target=handle_proc, args=(p,))
-    # t.start()
-    q.put(report_id)
+    proc_join_queue.put(report_id)
     return jsonify({
         'report_id': report_id
     })
-
 
 @app.route("/get_report/<report_id>")
 def get_report(report_id):
@@ -240,7 +230,6 @@ def get_report(report_id):
     return jsonify({
         'msg': 'Running',
     })
-
 
 @app.route('/reports/<report_name>')
 def send_report(report_name):
